@@ -1386,14 +1386,8 @@ static int smu_disable_dpms(struct smu_context *smu)
 {
 	struct amdgpu_device *adev = smu->adev;
 	int ret = 0;
-	/*
-	 * TODO: (adev->in_suspend && !adev->in_s0ix) is added to pair
-	 * the workaround which always reset the asic in suspend.
-	 * It's likely that workaround will be dropped in the future.
-	 * Then the change here should be dropped together.
-	 */
 	bool use_baco = !smu->is_apu &&
-		(((amdgpu_in_reset(adev) || (adev->in_suspend && !adev->in_s0ix)) &&
+		((amdgpu_in_reset(adev) &&
 		  (amdgpu_asic_reset_method(adev) == AMD_RESET_METHOD_BACO)) ||
 		 ((adev->in_runpm || adev->in_s4) && amdgpu_asic_supports_baco(adev)));
 
@@ -1542,7 +1536,9 @@ static int smu_suspend(void *handle)
 
 	smu->watermarks_bitmap &= ~(WATERMARKS_LOADED);
 
-	smu_set_gfx_cgpg(&adev->smu, false);
+	/* skip CGPG when in S0ix */
+	if (smu->is_apu && !adev->in_s0ix)
+		smu_set_gfx_cgpg(&adev->smu, false);
 
 	return 0;
 }
@@ -1573,7 +1569,8 @@ static int smu_resume(void *handle)
 		return ret;
 	}
 
-	smu_set_gfx_cgpg(&adev->smu, true);
+	if (smu->is_apu)
+		smu_set_gfx_cgpg(&adev->smu, true);
 
 	smu->disable_uclk_switch = 0;
 

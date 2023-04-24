@@ -5986,7 +5986,7 @@ int hisi_qm_resume(struct device *dev)
 	if (ret)
 		pci_err(pdev, "failed to start qm(%d)\n", ret);
 
-	return ret;
+	return 0;
 }
 EXPORT_SYMBOL_GPL(hisi_qm_resume);
 

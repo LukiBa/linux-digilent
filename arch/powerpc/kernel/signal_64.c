@@ -703,18 +703,15 @@ SYSCALL_DEFINE3(swapcontext, struct ucontext __user *, old_ctx,
 	 * We kill the task with a SIGSEGV in this situation.
 	 */
 
-	if (__get_user_sigset(&set, &new_ctx->uc_sigmask)) {
-		force_exit_sig(SIGSEGV);
-		return -EFAULT;
-	}
+	if (__get_user_sigset(&set, &new_ctx->uc_sigmask))
+		do_exit(SIGSEGV);
 	set_current_blocked(&set);
 
 	if (!user_read_access_begin(new_ctx, ctx_size))
 		return -EFAULT;
 	if (__unsafe_restore_sigcontext(current, NULL, 0, &new_ctx->uc_mcontext)) {
 		user_read_access_end();
-		force_exit_sig(SIGSEGV);
-		return -EFAULT;
+		do_exit(SIGSEGV);
 	}
 	user_read_access_end();
 

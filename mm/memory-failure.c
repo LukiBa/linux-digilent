@@ -1437,12 +1437,17 @@ static int memory_failure_hugetlb(unsigned long pfn, int flags)
 	if (!(flags & MF_COUNT_INCREASED)) {
 		res = get_hwpoison_page(p, flags);
 		if (!res) {
+			/*
+			 * Check "filter hit" and "race with other subpage."
+			 */
 			lock_page(head);
-			if (hwpoison_filter(p)) {
-				if (TestClearPageHWPoison(head))
+			if (PageHWPoison(head)) {
+				if ((hwpoison_filter(p) && TestClearPageHWPoison(p))
+				    || (p != head && TestSetPageHWPoison(head))) {
 					num_poisoned_pages_dec();
-				unlock_page(head);
-				return 0;
+					unlock_page(head);
+					return 0;
+				}
 			}
 			unlock_page(head);
 			res = MF_FAILED;
@@ -2201,7 +2206,6 @@ retry:
 	} else if (ret == 0) {
 		if (soft_offline_free_page(page) && try_again) {
 			try_again = false;
-			flags &= ~MF_COUNT_INCREASED;
 			goto retry;
 		}
 	}

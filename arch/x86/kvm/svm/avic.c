@@ -988,18 +988,16 @@ void avic_vcpu_put(struct kvm_vcpu *vcpu)
 static void avic_set_running(struct kvm_vcpu *vcpu, bool is_run)
 {
 	struct vcpu_svm *svm = to_svm(vcpu);
-	int cpu = get_cpu();
 
-	WARN_ON(cpu != vcpu->cpu);
 	svm->avic_is_running = is_run;
 
-	if (kvm_vcpu_apicv_active(vcpu)) {
-		if (is_run)
-			avic_vcpu_load(vcpu, cpu);
-		else
-			avic_vcpu_put(vcpu);
-	}
-	put_cpu();
+	if (!kvm_vcpu_apicv_active(vcpu))
+		return;
+
+	if (is_run)
+		avic_vcpu_load(vcpu, vcpu->cpu);
+	else
+		avic_vcpu_put(vcpu);
 }
 
 void svm_vcpu_blocking(struct kvm_vcpu *vcpu)

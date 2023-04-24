@@ -8,7 +8,6 @@
 #include <linux/clk.h>
 #include <linux/delay.h>
 #include <linux/dma-mapping.h>
-#include <linux/iopoll.h>
 #include <linux/ioport.h>
 #include <linux/irq.h>
 #include <linux/of_address.h>
@@ -628,11 +627,12 @@ static void msdc_reset_hw(struct msdc_host *host)
 	u32 val;
 
 	sdr_set_bits(host->base + MSDC_CFG, MSDC_CFG_RST);
-	readl_poll_timeout(host->base + MSDC_CFG, val, !(val & MSDC_CFG_RST), 0, 0);
+	while (readl(host->base + MSDC_CFG) & MSDC_CFG_RST)
+		cpu_relax();
 
 	sdr_set_bits(host->base + MSDC_FIFOCS, MSDC_FIFOCS_CLR);
-	readl_poll_timeout(host->base + MSDC_FIFOCS, val,
-			   !(val & MSDC_FIFOCS_CLR), 0, 0);
+	while (readl(host->base + MSDC_FIFOCS) & MSDC_FIFOCS_CLR)
+		cpu_relax();
 
 	val = readl(host->base + MSDC_INT);
 	writel(val, host->base + MSDC_INT);
@@ -805,9 +805,8 @@ static void msdc_gate_clock(struct msdc_host *host)
 	clk_disable_unprepare(host->h_clk);
 }
 
-static int msdc_ungate_clock(struct msdc_host *host)
+static void msdc_ungate_clock(struct msdc_host *host)
 {
-	u32 val;
 	int ret;
 
 	clk_prepare_enable(host->h_clk);
@@ -817,11 +816,11 @@ static int msdc_ungate_clock(struct msdc_host *host)
 	ret = clk_bulk_prepare_enable(MSDC_NR_CLOCKS, host->bulk_clks);
 	if (ret) {
 		dev_err(host->dev, "Cannot enable pclk/axi/ahb clock gates\n");
-		return ret;
+		return;
 	}
 
-	return readl_poll_timeout(host->base + MSDC_CFG, val,
-				  (val & MSDC_CFG_CKSTB), 1, 20000);
+	while (!(readl(host->base + MSDC_CFG) & MSDC_CFG_CKSTB))
+		cpu_relax();
 }
 
 static void msdc_set_mclk(struct msdc_host *host, unsigned char timing, u32 hz)
@@ -832,7 +831,6 @@ static void msdc_set_mclk(struct msdc_host *host, unsigned char timing, u32 hz)
 	u32 div;
 	u32 sclk;
 	u32 tune_reg = host->dev_comp->pad_tune_reg;
-	u32 val;
 
 	if (!hz) {
 		dev_dbg(host->dev, "set mclk to 0\n");
@@ -913,7 +911,8 @@ static void msdc_set_mclk(struct msdc_host *host, unsigned char timing, u32 hz)
 	else
 		clk_prepare_enable(clk_get_parent(host->src_clk));
 
-	readl_poll_timeout(host->base + MSDC_CFG, val, (val & MSDC_CFG_CKSTB), 0, 0);
+	while (!(readl(host->base + MSDC_CFG) & MSDC_CFG_CKSTB))
+		cpu_relax();
 	sdr_set_bits(host->base + MSDC_CFG, MSDC_CFG_CKPDN);
 	mmc->actual_clock = sclk;
 	host->mclk = hz;
@@ -1223,13 +1222,13 @@ static bool msdc_cmd_done(struct msdc_host *host, int events,
 static inline bool msdc_cmd_is_ready(struct msdc_host *host,
 		struct mmc_request *mrq, struct mmc_command *cmd)
 {
-	u32 val;
-	int ret;
-
 	/* The max busy time we can endure is 20ms */
-	ret = readl_poll_timeout_atomic(host->base + SDC_STS, val,
-					!(val & SDC_STS_CMDBUSY), 1, 20000);
-	if (ret) {
+	unsigned long tmo = jiffies + msecs_to_jiffies(20);
+
+	while ((readl(host->base + SDC_STS) & SDC_STS_CMDBUSY) &&
+			time_before(jiffies, tmo))
+		cpu_relax();
+	if (readl(host->base + SDC_STS) & SDC_STS_CMDBUSY) {
 		dev_err(host->dev, "CMD bus busy detected\n");
 		host->error |= REQ_CMD_BUSY;
 		msdc_cmd_done(host, MSDC_INT_CMDTMO, mrq, cmd);
@@ -1237,10 +1236,12 @@ static inline bool msdc_cmd_is_ready(struct msdc_host *host,
 	}
 
 	if (mmc_resp_type(cmd) == MMC_RSP_R1B || cmd->data) {
+		tmo = jiffies + msecs_to_jiffies(20);
 		/* R1B or with data, should check SDCBUSY */
-		ret = readl_poll_timeout_atomic(host->base + SDC_STS, val,
-						!(val & SDC_STS_SDCBUSY), 1, 20000);
-		if (ret) {
+		while ((readl(host->base + SDC_STS) & SDC_STS_SDCBUSY) &&
+				time_before(jiffies, tmo))
+			cpu_relax();
+		if (readl(host->base + SDC_STS) & SDC_STS_SDCBUSY) {
 			dev_err(host->dev, "Controller busy detected\n");
 			host->error |= REQ_CMD_BUSY;
 			msdc_cmd_done(host, MSDC_INT_CMDTMO, mrq, cmd);
@@ -1365,8 +1366,6 @@ static bool msdc_data_xfer_done(struct msdc_host *host, u32 events,
 	    (MSDC_INT_XFER_COMPL | MSDC_INT_DATCRCERR | MSDC_INT_DATTMO
 	     | MSDC_INT_DMA_BDCSERR | MSDC_INT_DMA_GPDCSERR
 	     | MSDC_INT_DMA_PROTECT);
-	u32 val;
-	int ret;
 
 	spin_lock_irqsave(&host->lock, flags);
 	done = !host->data;
@@ -1383,14 +1382,8 @@ static bool msdc_data_xfer_done(struct msdc_host *host, u32 events,
 				readl(host->base + MSDC_DMA_CFG));
 		sdr_set_field(host->base + MSDC_DMA_CTRL, MSDC_DMA_CTRL_STOP,
 				1);
-
-		ret = readl_poll_timeout_atomic(host->base + MSDC_DMA_CFG, val,
-						!(val & MSDC_DMA_CFG_STS), 1, 20000);
-		if (ret) {
-			dev_dbg(host->dev, "DMA stop timed out\n");
-			return false;
-		}
-
+		while (readl(host->base + MSDC_DMA_CFG) & MSDC_DMA_CFG_STS)
+			cpu_relax();
 		sdr_clr_bits(host->base + MSDC_INTEN, data_ints_mask);
 		dev_dbg(host->dev, "DMA stop\n");
 
@@ -2337,7 +2330,6 @@ static void msdc_cqe_enable(struct mmc_host *mmc)
 static void msdc_cqe_disable(struct mmc_host *mmc, bool recovery)
 {
 	struct msdc_host *host = mmc_priv(mmc);
-	unsigned int val = 0;
 
 	/* disable cmdq irq */
 	sdr_clr_bits(host->base + MSDC_INTEN, MSDC_INT_CMDQ);
@@ -2347,9 +2339,6 @@ static void msdc_cqe_disable(struct mmc_host *mmc, bool recovery)
 	if (recovery) {
 		sdr_set_field(host->base + MSDC_DMA_CTRL,
 			      MSDC_DMA_CTRL_STOP, 1);
-		if (WARN_ON(readl_poll_timeout(host->base + MSDC_DMA_CFG, val,
-			!(val & MSDC_DMA_CFG_STS), 1, 3000)))
-			return;
 		msdc_reset_hw(host);
 	}
 }
@@ -2604,11 +2593,7 @@ static int msdc_drv_probe(struct platform_device *pdev)
 	spin_lock_init(&host->lock);
 
 	platform_set_drvdata(pdev, mmc);
-	ret = msdc_ungate_clock(host);
-	if (ret) {
-		dev_err(&pdev->dev, "Cannot ungate clocks!\n");
-		goto release_mem;
-	}
+	msdc_ungate_clock(host);
 	msdc_init_hw(host);
 
 	if (mmc->caps2 & MMC_CAP2_CQE) {
@@ -2767,12 +2752,8 @@ static int __maybe_unused msdc_runtime_resume(struct device *dev)
 {
 	struct mmc_host *mmc = dev_get_drvdata(dev);
 	struct msdc_host *host = mmc_priv(mmc);
-	int ret;
 
-	ret = msdc_ungate_clock(host);
-	if (ret)
-		return ret;
-
+	msdc_ungate_clock(host);
 	msdc_restore_reg(host);
 	return 0;
 }

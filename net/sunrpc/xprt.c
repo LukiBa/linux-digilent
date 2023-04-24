@@ -1603,14 +1603,15 @@ xprt_transmit(struct rpc_task *task)
 {
 	struct rpc_rqst *next, *req = task->tk_rqstp;
 	struct rpc_xprt	*xprt = req->rq_xprt;
-	int status;
+	int counter, status;
 
 	spin_lock(&xprt->queue_lock);
-	for (;;) {
-		next = list_first_entry_or_null(&xprt->xmit_queue,
-						struct rpc_rqst, rq_xmit);
-		if (!next)
+	counter = 0;
+	while (!list_empty(&xprt->xmit_queue)) {
+		if (++counter == 20)
 			break;
+		next = list_first_entry(&xprt->xmit_queue,
+				struct rpc_rqst, rq_xmit);
 		xprt_pin_rqst(next);
 		spin_unlock(&xprt->queue_lock);
 		status = xprt_request_transmit(next, task);
@@ -1618,16 +1619,13 @@ xprt_transmit(struct rpc_task *task)
 			status = 0;
 		spin_lock(&xprt->queue_lock);
 		xprt_unpin_rqst(next);
-		if (status < 0) {
-			if (test_bit(RPC_TASK_NEED_XMIT, &task->tk_runstate))
-				task->tk_status = status;
-			break;
-		}
-		/* Was @task transmitted, and has it received a reply? */
-		if (xprt_request_data_received(task) &&
-		    !test_bit(RPC_TASK_NEED_XMIT, &task->tk_runstate))
-			break;
-		cond_resched_lock(&xprt->queue_lock);
+		if (status == 0) {
+			if (!xprt_request_data_received(task) ||
+			    test_bit(RPC_TASK_NEED_XMIT, &task->tk_runstate))
+				continue;
+		} else if (test_bit(RPC_TASK_NEED_XMIT, &task->tk_runstate))
+			task->tk_status = status;
+		break;
 	}
 	spin_unlock(&xprt->queue_lock);
 }

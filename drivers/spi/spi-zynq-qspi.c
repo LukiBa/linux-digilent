@@ -119,7 +119,7 @@
 #define ZYNQ_QSPI_MAX_NUM_CS		2
 
 /* Maximum address width */
-#define ZYNQ_QSPI_MAX_ADDR_WIDTH	4
+#define ZYNQ_QSPI_MAX_ADDR_WIDTH	3
 
 /**
  * struct zynq_qspi - Defines qspi driver instance
@@ -234,8 +234,6 @@ static void zynq_qspi_init_hw(struct zynq_qspi *xqspi, unsigned int num_cs)
 			(1 << ZYNQ_QSPI_LCFG_DUMMY_SHIFT) |
 			ZYNQ_QSPI_FAST_READ_QOUT_CODE));
 #endif
-	zynq_qspi_write(xqspi, ZYNQ_QSPI_ENABLE_OFFSET,
-			ZYNQ_QSPI_ENABLE_ENABLE_MASK);
 }
 
 static bool zynq_qspi_supports_op(struct spi_mem *mem,
@@ -405,8 +403,6 @@ static int zynq_qspi_setup_op(struct spi_device *spi)
 	if (ctlr->busy)
 		return -EBUSY;
 
-	clk_enable(qspi->refclk);
-	clk_enable(qspi->pclk);
 	zynq_qspi_write(qspi, ZYNQ_QSPI_ENABLE_OFFSET,
 			ZYNQ_QSPI_ENABLE_ENABLE_MASK);
 
@@ -541,7 +537,6 @@ static irqreturn_t zynq_qspi_irq(int irq, void *dev_id)
  * Executes a memory operation.
  *
  * This function first selects the chip and starts the memory operation.
- * Supports a maximum of ZYNQ_QSPI_MAX_ADDR_WIDTH bytes of address passed in op->addr.nbytes.
  *
  * Return: 0 in case of success, -EINVAL if address size greater than
  * ZYNQ_QSPI_MAX_ADDR_WIDTH.
@@ -599,6 +594,9 @@ static int zynq_qspi_exec_mem_op(struct spi_mem *mem,
 
 	if (op->dummy.nbytes) {
 		tmpbuf = kzalloc(op->dummy.nbytes, GFP_KERNEL);
+		if (!tmpbuf)
+			return -ENOMEM;
+
 		memset(tmpbuf, 0xff, op->dummy.nbytes);
 		reinit_completion(&xqspi->data_completion);
 		xqspi->txbuf = tmpbuf;

@@ -2379,8 +2379,7 @@ static void mpi_ssp_event(struct pm8001_hba_info *pm8001_ha, void *piomb)
 
 /*See the comments for mpi_ssp_completion */
 static void
-mpi_sata_completion(struct pm8001_hba_info *pm8001_ha,
-		struct outbound_queue_table *circularQ, void *piomb)
+mpi_sata_completion(struct pm8001_hba_info *pm8001_ha, void *piomb)
 {
 	struct sas_task *t;
 	struct pm8001_ccb_info *ccb;
@@ -2617,11 +2616,7 @@ mpi_sata_completion(struct pm8001_hba_info *pm8001_ha,
 				IO_OPEN_CNX_ERROR_IT_NEXUS_LOSS);
 			ts->resp = SAS_TASK_UNDELIVERED;
 			ts->stat = SAS_QUEUE_FULL;
-			spin_unlock_irqrestore(&circularQ->oq_lock,
-					circularQ->lock_flags);
 			pm8001_ccb_task_free_done(pm8001_ha, t, ccb, tag);
-			spin_lock_irqsave(&circularQ->oq_lock,
-					circularQ->lock_flags);
 			return;
 		}
 		break;
@@ -2637,11 +2632,7 @@ mpi_sata_completion(struct pm8001_hba_info *pm8001_ha,
 				IO_OPEN_CNX_ERROR_IT_NEXUS_LOSS);
 			ts->resp = SAS_TASK_UNDELIVERED;
 			ts->stat = SAS_QUEUE_FULL;
-			spin_unlock_irqrestore(&circularQ->oq_lock,
-					circularQ->lock_flags);
 			pm8001_ccb_task_free_done(pm8001_ha, t, ccb, tag);
-			spin_lock_irqsave(&circularQ->oq_lock,
-					circularQ->lock_flags);
 			return;
 		}
 		break;
@@ -2665,11 +2656,7 @@ mpi_sata_completion(struct pm8001_hba_info *pm8001_ha,
 				IO_OPEN_CNX_ERROR_STP_RESOURCES_BUSY);
 			ts->resp = SAS_TASK_UNDELIVERED;
 			ts->stat = SAS_QUEUE_FULL;
-			spin_unlock_irqrestore(&circularQ->oq_lock,
-					circularQ->lock_flags);
 			pm8001_ccb_task_free_done(pm8001_ha, t, ccb, tag);
-			spin_lock_irqsave(&circularQ->oq_lock,
-					circularQ->lock_flags);
 			return;
 		}
 		break;
@@ -2740,11 +2727,7 @@ mpi_sata_completion(struct pm8001_hba_info *pm8001_ha,
 					IO_DS_NON_OPERATIONAL);
 			ts->resp = SAS_TASK_UNDELIVERED;
 			ts->stat = SAS_QUEUE_FULL;
-			spin_unlock_irqrestore(&circularQ->oq_lock,
-					circularQ->lock_flags);
 			pm8001_ccb_task_free_done(pm8001_ha, t, ccb, tag);
-			spin_lock_irqsave(&circularQ->oq_lock,
-					circularQ->lock_flags);
 			return;
 		}
 		break;
@@ -2764,11 +2747,7 @@ mpi_sata_completion(struct pm8001_hba_info *pm8001_ha,
 					IO_DS_IN_ERROR);
 			ts->resp = SAS_TASK_UNDELIVERED;
 			ts->stat = SAS_QUEUE_FULL;
-			spin_unlock_irqrestore(&circularQ->oq_lock,
-					circularQ->lock_flags);
 			pm8001_ccb_task_free_done(pm8001_ha, t, ccb, tag);
-			spin_lock_irqsave(&circularQ->oq_lock,
-					circularQ->lock_flags);
 			return;
 		}
 		break;
@@ -2806,17 +2785,12 @@ mpi_sata_completion(struct pm8001_hba_info *pm8001_ha,
 		pm8001_ccb_task_free(pm8001_ha, t, ccb, tag);
 	} else {
 		spin_unlock_irqrestore(&t->task_state_lock, flags);
-		spin_unlock_irqrestore(&circularQ->oq_lock,
-				circularQ->lock_flags);
 		pm8001_ccb_task_free_done(pm8001_ha, t, ccb, tag);
-		spin_lock_irqsave(&circularQ->oq_lock,
-				circularQ->lock_flags);
 	}
 }
 
 /*See the comments for mpi_ssp_completion */
-static void mpi_sata_event(struct pm8001_hba_info *pm8001_ha,
-		struct outbound_queue_table *circularQ, void *piomb)
+static void mpi_sata_event(struct pm8001_hba_info *pm8001_ha, void *piomb)
 {
 	struct sas_task *t;
 	struct task_status_struct *ts;
@@ -2916,11 +2890,7 @@ static void mpi_sata_event(struct pm8001_hba_info *pm8001_ha,
 				IO_OPEN_CNX_ERROR_IT_NEXUS_LOSS);
 			ts->resp = SAS_TASK_COMPLETE;
 			ts->stat = SAS_QUEUE_FULL;
-			spin_unlock_irqrestore(&circularQ->oq_lock,
-					circularQ->lock_flags);
 			pm8001_ccb_task_free_done(pm8001_ha, t, ccb, tag);
-			spin_lock_irqsave(&circularQ->oq_lock,
-					circularQ->lock_flags);
 			return;
 		}
 		break;
@@ -3032,11 +3002,7 @@ static void mpi_sata_event(struct pm8001_hba_info *pm8001_ha,
 		pm8001_ccb_task_free(pm8001_ha, t, ccb, tag);
 	} else {
 		spin_unlock_irqrestore(&t->task_state_lock, flags);
-		spin_unlock_irqrestore(&circularQ->oq_lock,
-				circularQ->lock_flags);
 		pm8001_ccb_task_free_done(pm8001_ha, t, ccb, tag);
-		spin_lock_irqsave(&circularQ->oq_lock,
-				circularQ->lock_flags);
 	}
 }
 
@@ -3936,8 +3902,7 @@ static int ssp_coalesced_comp_resp(struct pm8001_hba_info *pm8001_ha,
  * @pm8001_ha: our hba card information
  * @piomb: IO message buffer
  */
-static void process_one_iomb(struct pm8001_hba_info *pm8001_ha,
-		struct outbound_queue_table *circularQ, void *piomb)
+static void process_one_iomb(struct pm8001_hba_info *pm8001_ha, void *piomb)
 {
 	__le32 pHeader = *(__le32 *)piomb;
 	u32 opc = (u32)((le32_to_cpu(pHeader)) & 0xFFF);
@@ -3979,11 +3944,11 @@ static void process_one_iomb(struct pm8001_hba_info *pm8001_ha,
 		break;
 	case OPC_OUB_SATA_COMP:
 		pm8001_dbg(pm8001_ha, MSG, "OPC_OUB_SATA_COMP\n");
-		mpi_sata_completion(pm8001_ha, circularQ, piomb);
+		mpi_sata_completion(pm8001_ha, piomb);
 		break;
 	case OPC_OUB_SATA_EVENT:
 		pm8001_dbg(pm8001_ha, MSG, "OPC_OUB_SATA_EVENT\n");
-		mpi_sata_event(pm8001_ha, circularQ, piomb);
+		mpi_sata_event(pm8001_ha, piomb);
 		break;
 	case OPC_OUB_SSP_EVENT:
 		pm8001_dbg(pm8001_ha, MSG, "OPC_OUB_SSP_EVENT\n");
@@ -4152,6 +4117,7 @@ static int process_oq(struct pm8001_hba_info *pm8001_ha, u8 vec)
 	void *pMsg1 = NULL;
 	u8 bc;
 	u32 ret = MPI_IO_STATUS_FAIL;
+	unsigned long flags;
 	u32 regval;
 
 	if (vec == (pm8001_ha->max_q_num - 1)) {
@@ -4168,7 +4134,7 @@ static int process_oq(struct pm8001_hba_info *pm8001_ha, u8 vec)
 		}
 	}
 	circularQ = &pm8001_ha->outbnd_q_tbl[vec];
-	spin_lock_irqsave(&circularQ->oq_lock, circularQ->lock_flags);
+	spin_lock_irqsave(&circularQ->oq_lock, flags);
 	do {
 		/* spurious interrupt during setup if kexec-ing and
 		 * driver doing a doorbell access w/ the pre-kexec oq
@@ -4179,8 +4145,7 @@ static int process_oq(struct pm8001_hba_info *pm8001_ha, u8 vec)
 		ret = pm8001_mpi_msg_consume(pm8001_ha, circularQ, &pMsg1, &bc);
 		if (MPI_IO_STATUS_SUCCESS == ret) {
 			/* process the outbound message */
-			process_one_iomb(pm8001_ha, circularQ,
-						(void *)(pMsg1 - 4));
+			process_one_iomb(pm8001_ha, (void *)(pMsg1 - 4));
 			/* free the message from the outbound circular buffer */
 			pm8001_mpi_msg_free_set(pm8001_ha, pMsg1,
 							circularQ, bc);
@@ -4195,7 +4160,7 @@ static int process_oq(struct pm8001_hba_info *pm8001_ha, u8 vec)
 				break;
 		}
 	} while (1);
-	spin_unlock_irqrestore(&circularQ->oq_lock, circularQ->lock_flags);
+	spin_unlock_irqrestore(&circularQ->oq_lock, flags);
 	return ret;
 }
 

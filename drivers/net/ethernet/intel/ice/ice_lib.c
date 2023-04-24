@@ -83,13 +83,8 @@ static int ice_vsi_alloc_arrays(struct ice_vsi *vsi)
 	if (!vsi->rx_rings)
 		goto err_rings;
 
-	/* txq_map needs to have enough space to track both Tx (stack) rings
-	 * and XDP rings; at this point vsi->num_xdp_txq might not be set,
-	 * so use num_possible_cpus() as we want to always provide XDP ring
-	 * per CPU, regardless of queue count settings from user that might
-	 * have come from ethtool's set_channels() callback;
-	 */
-	vsi->txq_map = devm_kcalloc(dev, (vsi->alloc_txq + num_possible_cpus()),
+	/* XDP will have vsi->alloc_txq Tx queues as well, so double the size */
+	vsi->txq_map = devm_kcalloc(dev, (2 * vsi->alloc_txq),
 				    sizeof(*vsi->txq_map), GFP_KERNEL);
 
 	if (!vsi->txq_map)
@@ -2865,8 +2860,7 @@ int ice_vsi_release(struct ice_vsi *vsi)
 		clear_bit(ICE_VSI_NETDEV_REGISTERED, vsi->state);
 	}
 
-	if (vsi->type == ICE_VSI_PF)
-		ice_devlink_destroy_pf_port(pf);
+	ice_devlink_destroy_port(vsi);
 
 	if (test_bit(ICE_FLAG_RSS_ENA, pf->flags))
 		ice_rss_clean(vsi);

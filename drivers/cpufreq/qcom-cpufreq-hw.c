@@ -304,8 +304,7 @@ static void qcom_lmh_dcvs_notify(struct qcom_cpufreq_data *data)
 	if (capacity > max_capacity)
 		capacity = max_capacity;
 
-	arch_set_thermal_pressure(policy->related_cpus,
-				  max_capacity - capacity);
+	arch_set_thermal_pressure(policy->cpus, max_capacity - capacity);
 
 	/*
 	 * In the unlikely case policy is unregistered do not enable
@@ -343,9 +342,9 @@ static irqreturn_t qcom_lmh_dcvs_handle_irq(int irq, void *data)
 
 	/* Disable interrupt and enable polling */
 	disable_irq_nosync(c_data->throttle_irq);
-	schedule_delayed_work(&c_data->throttle_work, 0);
+	qcom_lmh_dcvs_notify(c_data);
 
-	return IRQ_HANDLED;
+	return 0;
 }
 
 static const struct qcom_cpufreq_soc_data qcom_soc_data = {

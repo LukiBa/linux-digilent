@@ -458,7 +458,7 @@ static struct drm_display_mode simpledrm_mode(unsigned int width,
 {
 	struct drm_display_mode mode = { SIMPLEDRM_MODE(width, height) };
 
-	mode.clock = mode.hdisplay * mode.vdisplay * 60 / 1000 /* kHz */;
+	mode.clock = 60 /* Hz */ * mode.hdisplay * mode.vdisplay;
 	drm_mode_set_name(&mode);
 
 	return mode;

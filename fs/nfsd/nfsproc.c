@@ -557,17 +557,17 @@ nfsd_proc_rmdir(struct svc_rqst *rqstp)
 
 static void nfsd_init_dirlist_pages(struct svc_rqst *rqstp,
 				    struct nfsd_readdirres *resp,
-				    u32 count)
+				    int count)
 {
 	struct xdr_buf *buf = &resp->dirlist;
 	struct xdr_stream *xdr = &resp->xdr;
 
-	count = clamp(count, (u32)(XDR_UNIT * 2), svc_max_payload(rqstp));
+	count = min_t(u32, count, PAGE_SIZE);
 
 	memset(buf, 0, sizeof(*buf));
 
 	/* Reserve room for the NULL ptr & eof flag (-2 words) */
-	buf->buflen = count - XDR_UNIT * 2;
+	buf->buflen = count - sizeof(__be32) * 2;
 	buf->pages = rqstp->rq_next_page;
 	rqstp->rq_next_page++;
 
@@ -578,7 +578,7 @@ static void nfsd_init_dirlist_pages(struct svc_rqst *rqstp,
 	xdr->page_ptr = buf->pages;
 	xdr->iov = NULL;
 	xdr->p = page_address(*buf->pages);
-	xdr->end = (void *)xdr->p + min_t(u32, buf->buflen, PAGE_SIZE);
+	xdr->end = xdr->p + (PAGE_SIZE >> 2);
 	xdr->rqst = NULL;
 }
 

@@ -108,8 +108,6 @@ source "drivers/staging/xlnxsync/Kconfig"
 
 source "drivers/staging/xlnx_tsmux/Kconfig"
 
-source "drivers/staging/xlnx_axidma/Kconfig"
-
 source "drivers/staging/xroeframer/Kconfig"
 
 source "drivers/staging/xroetrafficgen/Kconfig"
@@ -117,5 +115,7 @@ source "drivers/staging/xroetrafficgen/Kconfig"
 source "drivers/staging/uartlite-rs485/Kconfig"
 
 source "drivers/staging/xilinx-tsn/Kconfig"
+
+source "drivers/staging/xlnx_hdcp1x/Kconfig"
 
 endif # STAGING

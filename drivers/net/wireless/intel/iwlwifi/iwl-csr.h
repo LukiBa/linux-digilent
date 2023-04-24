@@ -104,10 +104,9 @@
 /* GIO Chicken Bits (PCI Express bus link power management) */
 #define CSR_GIO_CHICKEN_BITS    (CSR_BASE+0x100)
 
-/* Doorbell - since Bz
- * connected to UREG_DOORBELL_TO_ISR6 (lower 16 bits only)
- */
+/* Doorbell NMI (since Bz) */
 #define CSR_DOORBELL_VECTOR	(CSR_BASE + 0x130)
+#define CSR_DOORBELL_VECTOR_NMI	BIT(1)
 
 /* host chicken bits */
 #define CSR_HOST_CHICKEN	(CSR_BASE + 0x204)

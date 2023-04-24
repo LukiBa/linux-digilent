@@ -674,23 +674,6 @@ perf_event_set_state(struct perf_event *event, enum perf_event_state state)
 	WRITE_ONCE(event->state, state);
 }
 
-/*
- * UP store-release, load-acquire
- */
-
-#define __store_release(ptr, val)					\
-do {									\
-	barrier();							\
-	WRITE_ONCE(*(ptr), (val));					\
-} while (0)
-
-#define __load_acquire(ptr)						\
-({									\
-	__unqual_scalar_typeof(*(ptr)) ___p = READ_ONCE(*(ptr));	\
-	barrier();							\
-	___p;								\
-})
-
 #ifdef CONFIG_CGROUP_PERF
 
 static inline bool
@@ -736,51 +719,34 @@ static inline u64 perf_cgroup_event_time(struct perf_event *event)
 	return t->time;
 }
 
-static inline u64 perf_cgroup_event_time_now(struct perf_event *event, u64 now)
+static inline void __update_cgrp_time(struct perf_cgroup *cgrp)
 {
-	struct perf_cgroup_info *t;
+	struct perf_cgroup_info *info;
+	u64 now;
 
-	t = per_cpu_ptr(event->cgrp->info, event->cpu);
-	if (!__load_acquire(&t->active))
-		return t->time;
-	now += READ_ONCE(t->timeoffset);
-	return now;
-}
+	now = perf_clock();
 
-static inline void __update_cgrp_time(struct perf_cgroup_info *info, u64 now, bool adv)
-{
-	if (adv)
-		info->time += now - info->timestamp;
+	info = this_cpu_ptr(cgrp->info);
+
+	info->time += now - info->timestamp;
 	info->timestamp = now;
-	/*
-	 * see update_context_time()
-	 */
-	WRITE_ONCE(info->timeoffset, info->time - info->timestamp);
 }
 
-static inline void update_cgrp_time_from_cpuctx(struct perf_cpu_context *cpuctx, bool final)
+static inline void update_cgrp_time_from_cpuctx(struct perf_cpu_context *cpuctx)
 {
 	struct perf_cgroup *cgrp = cpuctx->cgrp;
 	struct cgroup_subsys_state *css;
-	struct perf_cgroup_info *info;
 
 	if (cgrp) {
-		u64 now = perf_clock();
-
 		for (css = &cgrp->css; css; css = css->parent) {
 			cgrp = container_of(css, struct perf_cgroup, css);
-			info = this_cpu_ptr(cgrp->info);
-
-			__update_cgrp_time(info, now, true);
-			if (final)
-				__store_release(&info->active, 0);
+			__update_cgrp_time(cgrp);
 		}
 	}
 }
 
 static inline void update_cgrp_time_from_event(struct perf_event *event)
 {
-	struct perf_cgroup_info *info;
 	struct perf_cgroup *cgrp;
 
 	/*
@@ -794,10 +760,8 @@ static inline void update_cgrp_time_from_event(struct perf_event *event)
 	/*
 	 * Do not update time when cgroup is not active
 	 */
-	if (cgroup_is_descendant(cgrp->css.cgroup, event->cgrp->css.cgroup)) {
-		info = this_cpu_ptr(event->cgrp->info);
-		__update_cgrp_time(info, perf_clock(), true);
-	}
+	if (cgroup_is_descendant(cgrp->css.cgroup, event->cgrp->css.cgroup))
+		__update_cgrp_time(event->cgrp);
 }
 
 static inline void
@@ -821,8 +785,7 @@ perf_cgroup_set_timestamp(struct task_struct *task,
 	for (css = &cgrp->css; css; css = css->parent) {
 		cgrp = container_of(css, struct perf_cgroup, css);
 		info = this_cpu_ptr(cgrp->info);
-		__update_cgrp_time(info, ctx->timestamp, false);
-		__store_release(&info->active, 1);
+		info->timestamp = ctx->timestamp;
 	}
 }
 
@@ -1019,6 +982,14 @@ out:
 }
 
 static inline void
+perf_cgroup_set_shadow_time(struct perf_event *event, u64 now)
+{
+	struct perf_cgroup_info *t;
+	t = per_cpu_ptr(event->cgrp->info, event->cpu);
+	event->shadow_ctx_time = now - t->timestamp;
+}
+
+static inline void
 perf_cgroup_event_enable(struct perf_event *event, struct perf_event_context *ctx)
 {
 	struct perf_cpu_context *cpuctx;
@@ -1095,8 +1066,7 @@ static inline void update_cgrp_time_from_event(struct perf_event *event)
 {
 }
 
-static inline void update_cgrp_time_from_cpuctx(struct perf_cpu_context *cpuctx,
-						bool final)
+static inline void update_cgrp_time_from_cpuctx(struct perf_cpu_context *cpuctx)
 {
 }
 
@@ -1128,12 +1098,12 @@ perf_cgroup_switch(struct task_struct *task, struct task_struct *next)
 {
 }
 
-static inline u64 perf_cgroup_event_time(struct perf_event *event)
+static inline void
+perf_cgroup_set_shadow_time(struct perf_event *event, u64 now)
 {
-	return 0;
 }
 
-static inline u64 perf_cgroup_event_time_now(struct perf_event *event, u64 now)
+static inline u64 perf_cgroup_event_time(struct perf_event *event)
 {
 	return 0;
 }
@@ -1555,59 +1525,22 @@ static void perf_unpin_context(struct perf_event_context *ctx)
 /*
  * Update the record of the current time in a context.
  */
-static void __update_context_time(struct perf_event_context *ctx, bool adv)
+static void update_context_time(struct perf_event_context *ctx)
 {
 	u64 now = perf_clock();
 
-	if (adv)
-		ctx->time += now - ctx->timestamp;
+	ctx->time += now - ctx->timestamp;
 	ctx->timestamp = now;
-
-	/*
-	 * The above: time' = time + (now - timestamp), can be re-arranged
-	 * into: time` = now + (time - timestamp), which gives a single value
-	 * offset to compute future time without locks on.
-	 *
-	 * See perf_event_time_now(), which can be used from NMI context where
-	 * it's (obviously) not possible to acquire ctx->lock in order to read
-	 * both the above values in a consistent manner.
-	 */
-	WRITE_ONCE(ctx->timeoffset, ctx->time - ctx->timestamp);
-}
-
-static void update_context_time(struct perf_event_context *ctx)
-{
-	__update_context_time(ctx, true);
 }
 
 static u64 perf_event_time(struct perf_event *event)
 {
 	struct perf_event_context *ctx = event->ctx;
 
-	if (unlikely(!ctx))
-		return 0;
-
 	if (is_cgroup_event(event))
 		return perf_cgroup_event_time(event);
 
-	return ctx->time;
-}
-
-static u64 perf_event_time_now(struct perf_event *event, u64 now)
-{
-	struct perf_event_context *ctx = event->ctx;
-
-	if (unlikely(!ctx))
-		return 0;
-
-	if (is_cgroup_event(event))
-		return perf_cgroup_event_time_now(event, now);
-
-	if (!(__load_acquire(&ctx->is_active) & EVENT_TIME))
-		return ctx->time;
-
-	now += READ_ONCE(ctx->timeoffset);
-	return now;
+	return ctx ? ctx->time : 0;
 }
 
 static enum event_type_t get_event_type(struct perf_event *event)
@@ -2413,7 +2346,7 @@ __perf_remove_from_context(struct perf_event *event,
 
 	if (ctx->is_active & EVENT_TIME) {
 		update_context_time(ctx);
-		update_cgrp_time_from_cpuctx(cpuctx, false);
+		update_cgrp_time_from_cpuctx(cpuctx);
 	}
 
 	event_sched_out(event, cpuctx, ctx);
@@ -2424,9 +2357,6 @@ __perf_remove_from_context(struct perf_event *event,
 	list_del_event(event, ctx);
 
 	if (!ctx->nr_events && ctx->is_active) {
-		if (ctx == &cpuctx->ctx)
-			update_cgrp_time_from_cpuctx(cpuctx, true);
-
 		ctx->is_active = 0;
 		ctx->rotate_necessary = 0;
 		if (ctx->task) {
@@ -2458,11 +2388,7 @@ static void perf_remove_from_context(struct perf_event *event, unsigned long fla
 	 * event_function_call() user.
 	 */
 	raw_spin_lock_irq(&ctx->lock);
-	/*
-	 * Cgroup events are per-cpu events, and must IPI because of
-	 * cgrp_cpuctx_list.
-	 */
-	if (!ctx->is_active && !is_cgroup_event(event)) {
+	if (!ctx->is_active) {
 		__perf_remove_from_context(event, __get_cpu_context(ctx),
 					   ctx, (void *)flags);
 		raw_spin_unlock_irq(&ctx->lock);
@@ -2552,6 +2478,40 @@ void perf_event_disable_inatomic(struct perf_event *event)
 	irq_work_queue(&event->pending);
 }
 
+static void perf_set_shadow_time(struct perf_event *event,
+				 struct perf_event_context *ctx)
+{
+	/*
+	 * use the correct time source for the time snapshot
+	 *
+	 * We could get by without this by leveraging the
+	 * fact that to get to this function, the caller
+	 * has most likely already called update_context_time()
+	 * and update_cgrp_time_xx() and thus both timestamp
+	 * are identical (or very close). Given that tstamp is,
+	 * already adjusted for cgroup, we could say that:
+	 *    tstamp - ctx->timestamp
+	 * is equivalent to
+	 *    tstamp - cgrp->timestamp.
+	 *
+	 * Then, in perf_output_read(), the calculation would
+	 * work with no changes because:
+	 * - event is guaranteed scheduled in
+	 * - no scheduled out in between
+	 * - thus the timestamp would be the same
+	 *
+	 * But this is a bit hairy.
+	 *
+	 * So instead, we have an explicit cgroup call to remain
+	 * within the time source all along. We believe it
+	 * is cleaner and simpler to understand.
+	 */
+	if (is_cgroup_event(event))
+		perf_cgroup_set_shadow_time(event, event->tstamp);
+	else
+		event->shadow_ctx_time = event->tstamp - ctx->timestamp;
+}
+
 #define MAX_INTERRUPTS (~0ULL)
 
 static void perf_log_throttle(struct perf_event *event, int enable);
@@ -2591,6 +2551,8 @@ event_sched_in(struct perf_event *event,
 	}
 
 	perf_pmu_disable(event->pmu);
+
+	perf_set_shadow_time(event, ctx);
 
 	perf_log_itrace_start(event);
 
@@ -2895,14 +2857,11 @@ perf_install_in_context(struct perf_event_context *ctx,
 	 * perf_event_attr::disabled events will not run and can be initialized
 	 * without IPI. Except when this is the first event for the context, in
 	 * that case we need the magic of the IPI to set ctx->is_active.
-	 * Similarly, cgroup events for the context also needs the IPI to
-	 * manipulate the cgrp_cpuctx_list.
 	 *
 	 * The IOC_ENABLE that is sure to follow the creation of a disabled
 	 * event will issue the IPI and reprogram the hardware.
 	 */
-	if (__perf_effective_state(event) == PERF_EVENT_STATE_OFF &&
-	    ctx->nr_events && !is_cgroup_event(event)) {
+	if (__perf_effective_state(event) == PERF_EVENT_STATE_OFF && ctx->nr_events) {
 		raw_spin_lock_irq(&ctx->lock);
 		if (ctx->task == TASK_TOMBSTONE) {
 			raw_spin_unlock_irq(&ctx->lock);
@@ -3288,6 +3247,16 @@ static void ctx_sched_out(struct perf_event_context *ctx,
 		return;
 	}
 
+	ctx->is_active &= ~event_type;
+	if (!(ctx->is_active & EVENT_ALL))
+		ctx->is_active = 0;
+
+	if (ctx->task) {
+		WARN_ON_ONCE(cpuctx->task_ctx != ctx);
+		if (!ctx->is_active)
+			cpuctx->task_ctx = NULL;
+	}
+
 	/*
 	 * Always update time if it was set; not only when it changes.
 	 * Otherwise we can 'forget' to update time for any but the last
@@ -3301,22 +3270,7 @@ static void ctx_sched_out(struct perf_event_context *ctx,
 	if (is_active & EVENT_TIME) {
 		/* update (and stop) ctx time */
 		update_context_time(ctx);
-		update_cgrp_time_from_cpuctx(cpuctx, ctx == &cpuctx->ctx);
-		/*
-		 * CPU-release for the below ->is_active store,
-		 * see __load_acquire() in perf_event_time_now()
-		 */
-		barrier();
-	}
-
-	ctx->is_active &= ~event_type;
-	if (!(ctx->is_active & EVENT_ALL))
-		ctx->is_active = 0;
-
-	if (ctx->task) {
-		WARN_ON_ONCE(cpuctx->task_ctx != ctx);
-		if (!ctx->is_active)
-			cpuctx->task_ctx = NULL;
+		update_cgrp_time_from_cpuctx(cpuctx);
 	}
 
 	is_active ^= ctx->is_active; /* changed bits */
@@ -3753,19 +3707,13 @@ static noinline int visit_groups_merge(struct perf_cpu_context *cpuctx,
 	return 0;
 }
 
-/*
- * Because the userpage is strictly per-event (there is no concept of context,
- * so there cannot be a context indirection), every userpage must be updated
- * when context time starts :-(
- *
- * IOW, we must not miss EVENT_TIME edges.
- */
 static inline bool event_update_userpage(struct perf_event *event)
 {
 	if (likely(!atomic_read(&event->mmap_count)))
 		return false;
 
 	perf_event_update_time(event);
+	perf_set_shadow_time(event, event->ctx);
 	perf_event_update_userpage(event);
 
 	return true;
@@ -3849,22 +3797,12 @@ ctx_sched_in(struct perf_event_context *ctx,
 	     struct task_struct *task)
 {
 	int is_active = ctx->is_active;
+	u64 now;
 
 	lockdep_assert_held(&ctx->lock);
 
 	if (likely(!ctx->nr_events))
 		return;
-
-	if (is_active ^ EVENT_TIME) {
-		/* start ctx time */
-		__update_context_time(ctx, false);
-		perf_cgroup_set_timestamp(task, ctx);
-		/*
-		 * CPU-release for the below ->is_active store,
-		 * see __load_acquire() in perf_event_time_now()
-		 */
-		barrier();
-	}
 
 	ctx->is_active |= (event_type | EVENT_TIME);
 	if (ctx->task) {
@@ -3875,6 +3813,13 @@ ctx_sched_in(struct perf_event_context *ctx,
 	}
 
 	is_active ^= ctx->is_active; /* changed bits */
+
+	if (is_active & EVENT_TIME) {
+		/* start ctx time */
+		now = perf_clock();
+		ctx->timestamp = now;
+		perf_cgroup_set_timestamp(task, ctx);
+	}
 
 	/*
 	 * First go through the list and put on any pinned groups
@@ -4469,18 +4414,6 @@ static inline u64 perf_event_count(struct perf_event *event)
 	return local64_read(&event->count) + atomic64_read(&event->child_count);
 }
 
-static void calc_timer_values(struct perf_event *event,
-				u64 *now,
-				u64 *enabled,
-				u64 *running)
-{
-	u64 ctx_time;
-
-	*now = perf_clock();
-	ctx_time = perf_event_time_now(event, *now);
-	__perf_update_times(event, ctx_time, enabled, running);
-}
-
 /*
  * NMI-safe method to read a local event, that is an event that
  * is:
@@ -4540,9 +4473,10 @@ int perf_event_read_local(struct perf_event *event, u64 *value,
 
 	*value = local64_read(&event->count);
 	if (enabled || running) {
-		u64 __enabled, __running, __now;;
+		u64 now = event->shadow_ctx_time + perf_clock();
+		u64 __enabled, __running;
 
-		calc_timer_values(event, &__now, &__enabled, &__running);
+		__perf_update_times(event, now, &__enabled, &__running);
 		if (enabled)
 			*enabled = __enabled;
 		if (running)
@@ -5864,6 +5798,18 @@ static int perf_event_index(struct perf_event *event)
 	return event->pmu->event_idx(event);
 }
 
+static void calc_timer_values(struct perf_event *event,
+				u64 *now,
+				u64 *enabled,
+				u64 *running)
+{
+	u64 ctx_time;
+
+	*now = perf_clock();
+	ctx_time = event->shadow_ctx_time + *now;
+	__perf_update_times(event, ctx_time, enabled, running);
+}
+
 static void perf_event_init_userpage(struct perf_event *event)
 {
 	struct perf_event_mmap_page *userpg;
@@ -6403,6 +6349,7 @@ accounting:
 		ring_buffer_attach(event, rb);
 
 		perf_event_update_time(event);
+		perf_set_shadow_time(event, event->ctx);
 		perf_event_init_userpage(event);
 		perf_event_update_userpage(event);
 	} else {
@@ -6579,25 +6526,18 @@ static void perf_pending_event(struct irq_work *entry)
  * Later on, we might change it to a list if there is
  * another virtualization implementation supporting the callbacks.
  */
-struct perf_guest_info_callbacks __rcu *perf_guest_cbs;
+struct perf_guest_info_callbacks *perf_guest_cbs;
 
 int perf_register_guest_info_callbacks(struct perf_guest_info_callbacks *cbs)
 {
-	if (WARN_ON_ONCE(rcu_access_pointer(perf_guest_cbs)))
-		return -EBUSY;
-
-	rcu_assign_pointer(perf_guest_cbs, cbs);
+	perf_guest_cbs = cbs;
 	return 0;
 }
 EXPORT_SYMBOL_GPL(perf_register_guest_info_callbacks);
 
 int perf_unregister_guest_info_callbacks(struct perf_guest_info_callbacks *cbs)
 {
-	if (WARN_ON_ONCE(rcu_access_pointer(perf_guest_cbs) != cbs))
-		return -EINVAL;
-
-	rcu_assign_pointer(perf_guest_cbs, NULL);
-	synchronize_rcu();
+	perf_guest_cbs = NULL;
 	return 0;
 }
 EXPORT_SYMBOL_GPL(perf_unregister_guest_info_callbacks);
@@ -7214,6 +7154,7 @@ void perf_output_sample(struct perf_output_handle *handle,
 static u64 perf_virt_to_phys(u64 virt)
 {
 	u64 phys_addr = 0;
+	struct page *p = NULL;
 
 	if (!virt)
 		return 0;
@@ -7232,15 +7173,14 @@ static u64 perf_virt_to_phys(u64 virt)
 		 * If failed, leave phys_addr as 0.
 		 */
 		if (current->mm != NULL) {
-			struct page *p;
-
 			pagefault_disable();
-			if (get_user_page_fast_only(virt, 0, &p)) {
+			if (get_user_page_fast_only(virt, 0, &p))
 				phys_addr = page_to_phys(p) + virt % PAGE_SIZE;
-				put_page(p);
-			}
 			pagefault_enable();
 		}
+
+		if (p)
+			put_page(p);
 	}
 
 	return phys_addr;
@@ -9788,9 +9728,6 @@ void perf_tp_event(u16 event_type, u64 count, void *record, int entry_size,
 			if (event->attr.type != PERF_TYPE_TRACEPOINT)
 				continue;
 			if (event->attr.config != entry->type)
-				continue;
-			/* Cannot deliver synchronous signal to other task. */
-			if (event->attr.sigtrap)
 				continue;
 			if (perf_tp_event_match(event, &data, regs))
 				perf_swevent_event(event, count, &data, regs);

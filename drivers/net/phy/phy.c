@@ -815,12 +815,7 @@ int phy_ethtool_ksettings_set(struct phy_device *phydev,
 	phydev->mdix_ctrl = cmd->base.eth_tp_mdix_ctrl;
 
 	/* Restart the PHY */
-	if (phy_is_started(phydev)) {
-		phydev->state = PHY_UP;
-		phy_trigger_machine(phydev);
-	} else {
-		_phy_start_aneg(phydev);
-	}
+	_phy_start_aneg(phydev);
 
 	mutex_unlock(&phydev->lock);
 	return 0;
@@ -1053,6 +1048,9 @@ void phy_stop(struct phy_device *phydev)
 	phydev->state = PHY_HALTED;
 
 	mutex_unlock(&phydev->lock);
+
+	phy_state_machine(&phydev->state_queue.work);
+	phy_stop_machine(phydev);
 
 	/* Cannot call flush_scheduled_work() here as desired because
 	 * of rtnl_lock(), but PHY_HALTED shall guarantee irq handler

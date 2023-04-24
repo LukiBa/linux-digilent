@@ -389,10 +389,8 @@ void blk_cleanup_queue(struct request_queue *q)
 	blk_queue_flag_set(QUEUE_FLAG_DEAD, q);
 
 	blk_sync_queue(q);
-	if (queue_is_mq(q)) {
-		blk_mq_cancel_work_sync(q);
+	if (queue_is_mq(q))
 		blk_mq_exit_queue(q);
-	}
 
 	/*
 	 * In theory, request pool of sched_tags belongs to request queue.
@@ -889,8 +887,10 @@ static noinline_for_stack bool submit_bio_checks(struct bio *bio)
 	if (unlikely(!current->io_context))
 		create_task_io_context(current, GFP_ATOMIC, q->node);
 
-	if (blk_throtl_bio(bio))
+	if (blk_throtl_bio(bio)) {
+		blkcg_bio_issue_init(bio);
 		return false;
+	}
 
 	blk_cgroup_bio_start(bio);
 	blkcg_bio_issue_init(bio);
@@ -1293,32 +1293,20 @@ void blk_account_io_start(struct request *rq)
 }
 
 static unsigned long __part_start_io_acct(struct block_device *part,
-					  unsigned int sectors, unsigned int op,
-					  unsigned long start_time)
+					  unsigned int sectors, unsigned int op)
 {
 	const int sgrp = op_stat_group(op);
+	unsigned long now = READ_ONCE(jiffies);
 
 	part_stat_lock();
-	update_io_ticks(part, start_time, false);
+	update_io_ticks(part, now, false);
 	part_stat_inc(part, ios[sgrp]);
 	part_stat_add(part, sectors[sgrp], sectors);
 	part_stat_local_inc(part, in_flight[op_is_write(op)]);
 	part_stat_unlock();
 
-	return start_time;
+	return now;
 }
-
-/**
- * bio_start_io_acct_time - start I/O accounting for bio based drivers
- * @bio:	bio to start account for
- * @start_time:	start time that should be passed back to bio_end_io_acct().
- */
-void bio_start_io_acct_time(struct bio *bio, unsigned long start_time)
-{
-	__part_start_io_acct(bio->bi_bdev, bio_sectors(bio),
-			     bio_op(bio), start_time);
-}
-EXPORT_SYMBOL_GPL(bio_start_io_acct_time);
 
 /**
  * bio_start_io_acct - start I/O accounting for bio based drivers
@@ -1328,15 +1316,14 @@ EXPORT_SYMBOL_GPL(bio_start_io_acct_time);
  */
 unsigned long bio_start_io_acct(struct bio *bio)
 {
-	return __part_start_io_acct(bio->bi_bdev, bio_sectors(bio),
-				    bio_op(bio), jiffies);
+	return __part_start_io_acct(bio->bi_bdev, bio_sectors(bio), bio_op(bio));
 }
 EXPORT_SYMBOL_GPL(bio_start_io_acct);
 
 unsigned long disk_start_io_acct(struct gendisk *disk, unsigned int sectors,
 				 unsigned int op)
 {
-	return __part_start_io_acct(disk->part0, sectors, op, jiffies);
+	return __part_start_io_acct(disk->part0, sectors, op);
 }
 EXPORT_SYMBOL(disk_start_io_acct);
 

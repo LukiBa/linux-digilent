@@ -4263,11 +4263,12 @@ SYSCALL_DEFINE5(mount_setattr, int, dfd, const char __user *, path,
 		return err;
 
 	err = user_path_at(dfd, path, kattr.lookup_flags, &target);
-	if (!err) {
-		err = do_mount_setattr(&target, &kattr);
-		path_put(&target);
-	}
+	if (err)
+		return err;
+
+	err = do_mount_setattr(&target, &kattr);
 	finish_mount_kattr(&kattr);
+	path_put(&target);
 	return err;
 }
 

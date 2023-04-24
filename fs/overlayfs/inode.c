@@ -610,10 +610,7 @@ int ovl_real_fileattr_get(struct path *realpath, struct fileattr *fa)
 	if (err)
 		return err;
 
-	err = vfs_fileattr_get(realpath->dentry, fa);
-	if (err == -ENOIOCTLCMD)
-		err = -ENOTTY;
-	return err;
+	return vfs_fileattr_get(realpath->dentry, fa);
 }
 
 int ovl_fileattr_get(struct dentry *dentry, struct fileattr *fa)

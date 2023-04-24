@@ -97,8 +97,6 @@ enum {
 	MLX5_ATOMIC_REQ_MODE_HOST_ENDIANNESS = 0x1,
 };
 
-#define LOG_MAX_SUPPORTED_QPS 0xff
-
 static struct mlx5_profile profile[] = {
 	[0] = {
 		.mask           = 0,
@@ -110,7 +108,7 @@ static struct mlx5_profile profile[] = {
 	[2] = {
 		.mask		= MLX5_PROF_MASK_QP_SIZE |
 				  MLX5_PROF_MASK_MR_CACHE,
-		.log_max_qp	= LOG_MAX_SUPPORTED_QPS,
+		.log_max_qp	= 18,
 		.mr_cache[0]	= {
 			.size	= 500,
 			.limit	= 250
@@ -515,9 +513,7 @@ static int handle_hca_cap(struct mlx5_core_dev *dev, void *set_ctx)
 		 to_fw_pkey_sz(dev, 128));
 
 	/* Check log_max_qp from HCA caps to set in current profile */
-	if (prof->log_max_qp == LOG_MAX_SUPPORTED_QPS) {
-		prof->log_max_qp = MLX5_CAP_GEN_MAX(dev, log_max_qp);
-	} else if (MLX5_CAP_GEN_MAX(dev, log_max_qp) < prof->log_max_qp) {
+	if (MLX5_CAP_GEN_MAX(dev, log_max_qp) < prof->log_max_qp) {
 		mlx5_core_warn(dev, "log_max_qp value in current profile is %d, changing it to HCA capability limit (%d)\n",
 			       prof->log_max_qp,
 			       MLX5_CAP_GEN_MAX(dev, log_max_qp));
@@ -1541,7 +1537,6 @@ static int probe_one(struct pci_dev *pdev, const struct pci_device_id *id)
 		dev_err(&pdev->dev, "mlx5_crdump_enable failed with error code %d\n", err);
 
 	pci_save_state(pdev);
-	devlink_register(devlink);
 	if (!mlx5_core_is_mp_slave(dev))
 		devlink_reload_enable(devlink);
 	return 0;
@@ -1564,7 +1559,6 @@ static void remove_one(struct pci_dev *pdev)
 	struct devlink *devlink = priv_to_devlink(dev);
 
 	devlink_reload_disable(devlink);
-	devlink_unregister(devlink);
 	mlx5_crdump_disable(dev);
 	mlx5_drain_health_wq(dev);
 	mlx5_uninit_one(dev);
@@ -1779,13 +1773,12 @@ void mlx5_disable_device(struct mlx5_core_dev *dev)
 
 int mlx5_recover_device(struct mlx5_core_dev *dev)
 {
-	if (!mlx5_core_is_sf(dev)) {
-		mlx5_pci_disable_device(dev);
-		if (mlx5_pci_slot_reset(dev->pdev) != PCI_ERS_RESULT_RECOVERED)
-			return -EIO;
-	}
+	int ret = -EIO;
 
-	return mlx5_load_one(dev);
+	mlx5_pci_disable_device(dev);
+	if (mlx5_pci_slot_reset(dev->pdev) == PCI_ERS_RESULT_RECOVERED)
+		ret = mlx5_load_one(dev);
+	return ret;
 }
 
 static struct pci_driver mlx5_core_driver = {

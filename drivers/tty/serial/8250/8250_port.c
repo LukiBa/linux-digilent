@@ -2024,6 +2024,13 @@ void serial8250_do_set_mctrl(struct uart_port *port, unsigned int mctrl)
 	struct uart_8250_port *up = up_to_u8250p(port);
 	unsigned char mcr;
 
+	if (port->rs485.flags & SER_RS485_ENABLED) {
+		if (serial8250_in_MCR(up) & UART_MCR_RTS)
+			mctrl |= TIOCM_RTS;
+		else
+			mctrl &= ~TIOCM_RTS;
+	}
+
 	mcr = serial8250_TIOCM_to_MCR(mctrl);
 
 	mcr = (mcr & up->mcr_mask) | up->mcr_force | up->mcr;
@@ -2689,32 +2696,21 @@ static unsigned int serial8250_get_baud_rate(struct uart_port *port,
 void serial8250_update_uartclk(struct uart_port *port, unsigned int uartclk)
 {
 	struct uart_8250_port *up = up_to_u8250p(port);
-	struct tty_port *tport = &port->state->port;
 	unsigned int baud, quot, frac = 0;
 	struct ktermios *termios;
-	struct tty_struct *tty;
 	unsigned long flags;
 
-	tty = tty_port_tty_get(tport);
-	if (!tty) {
-		mutex_lock(&tport->mutex);
-		port->uartclk = uartclk;
-		mutex_unlock(&tport->mutex);
-		return;
-	}
-
-	down_write(&tty->termios_rwsem);
-	mutex_lock(&tport->mutex);
+	mutex_lock(&port->state->port.mutex);
 
 	if (port->uartclk == uartclk)
 		goto out_lock;
 
 	port->uartclk = uartclk;
 
-	if (!tty_port_initialized(tport))
+	if (!tty_port_initialized(&port->state->port))
 		goto out_lock;
 
-	termios = &tty->termios;
+	termios = &port->state->port.tty->termios;
 
 	baud = serial8250_get_baud_rate(port, termios, NULL);
 	quot = serial8250_get_divisor(port, baud, &frac);
@@ -2731,9 +2727,7 @@ void serial8250_update_uartclk(struct uart_port *port, unsigned int uartclk)
 	serial8250_rpm_put(up);
 
 out_lock:
-	mutex_unlock(&tport->mutex);
-	up_write(&tty->termios_rwsem);
-	tty_kref_put(tty);
+	mutex_unlock(&port->state->port.mutex);
 }
 EXPORT_SYMBOL_GPL(serial8250_update_uartclk);
 

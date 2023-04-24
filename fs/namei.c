@@ -3975,12 +3975,13 @@ int vfs_rmdir(struct user_namespace *mnt_userns, struct inode *dir,
 	dentry->d_inode->i_flags |= S_DEAD;
 	dont_mount(dentry);
 	detach_mounts(dentry);
+	fsnotify_rmdir(dir, dentry);
 
 out:
 	inode_unlock(dentry->d_inode);
 	dput(dentry);
 	if (!error)
-		d_delete_notify(dir, dentry);
+		d_delete(dentry);
 	return error;
 }
 EXPORT_SYMBOL(vfs_rmdir);
@@ -4102,6 +4103,7 @@ int vfs_unlink(struct user_namespace *mnt_userns, struct inode *dir,
 			if (!error) {
 				dont_mount(dentry);
 				detach_mounts(dentry);
+				fsnotify_unlink(dir, dentry);
 			}
 		}
 	}
@@ -4109,11 +4111,9 @@ out:
 	inode_unlock(target);
 
 	/* We don't d_delete() NFS sillyrenamed files--they still exist. */
-	if (!error && dentry->d_flags & DCACHE_NFSFS_RENAMED) {
-		fsnotify_unlink(dir, dentry);
-	} else if (!error) {
+	if (!error && !(dentry->d_flags & DCACHE_NFSFS_RENAMED)) {
 		fsnotify_link_count(target);
-		d_delete_notify(dir, dentry);
+		d_delete(dentry);
 	}
 
 	return error;

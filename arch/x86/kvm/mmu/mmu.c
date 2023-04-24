@@ -1592,7 +1592,7 @@ bool kvm_unmap_gfn_range(struct kvm *kvm, struct kvm_gfn_range *range)
 		flush = kvm_handle_gfn_range(kvm, range, kvm_unmap_rmapp);
 
 	if (is_tdp_mmu_enabled(kvm))
-		flush = kvm_tdp_mmu_unmap_gfn_range(kvm, range, flush);
+		flush |= kvm_tdp_mmu_unmap_gfn_range(kvm, range, flush);
 
 	return flush;
 }
@@ -2188,10 +2188,10 @@ static void shadow_walk_init_using_root(struct kvm_shadow_walk_iterator *iterato
 	iterator->shadow_addr = root;
 	iterator->level = vcpu->arch.mmu->shadow_root_level;
 
-	if (iterator->level >= PT64_ROOT_4LEVEL &&
+	if (iterator->level == PT64_ROOT_4LEVEL &&
 	    vcpu->arch.mmu->root_level < PT64_ROOT_4LEVEL &&
 	    !vcpu->arch.mmu->direct_map)
-		iterator->level = PT32E_ROOT_LEVEL;
+		--iterator->level;
 
 	if (iterator->level == PT32E_ROOT_LEVEL) {
 		/*
@@ -4679,7 +4679,6 @@ static union kvm_mmu_extended_role kvm_calc_mmu_role_ext(struct kvm_vcpu *vcpu,
 		/* PKEY and LA57 are active iff long mode is active. */
 		ext.cr4_pke = ____is_efer_lma(regs) && ____is_cr4_pke(regs);
 		ext.cr4_la57 = ____is_efer_lma(regs) && ____is_cr4_la57(regs);
-		ext.efer_lma = ____is_efer_lma(regs);
 	}
 
 	ext.valid = 1;
@@ -4852,7 +4851,7 @@ void kvm_init_shadow_npt_mmu(struct kvm_vcpu *vcpu, unsigned long cr0,
 	struct kvm_mmu *context = &vcpu->arch.guest_mmu;
 	struct kvm_mmu_role_regs regs = {
 		.cr0 = cr0,
-		.cr4 = cr4 & ~X86_CR4_PKE,
+		.cr4 = cr4,
 		.efer = efer,
 	};
 	union kvm_mmu_role new_role;
@@ -4916,7 +4915,7 @@ void kvm_init_shadow_ept_mmu(struct kvm_vcpu *vcpu, bool execonly,
 	context->direct_map = false;
 
 	update_permission_bitmask(context, true);
-	context->pkru_mask = 0;
+	update_pkru_bitmask(context);
 	reset_rsvds_bits_mask_ept(vcpu, context, execonly);
 	reset_ept_shadow_zero_bits_mask(vcpu, context, execonly);
 }
@@ -5369,7 +5368,7 @@ void kvm_mmu_invalidate_gva(struct kvm_vcpu *vcpu, struct kvm_mmu *mmu,
 
 void kvm_mmu_invlpg(struct kvm_vcpu *vcpu, gva_t gva)
 {
-	kvm_mmu_invalidate_gva(vcpu, vcpu->arch.walk_mmu, gva, INVALID_PAGE);
+	kvm_mmu_invalidate_gva(vcpu, vcpu->arch.mmu, gva, INVALID_PAGE);
 	++vcpu->stat.invlpg;
 }
 EXPORT_SYMBOL_GPL(kvm_mmu_invlpg);
@@ -5474,8 +5473,8 @@ slot_handle_level(struct kvm *kvm, const struct kvm_memory_slot *memslot,
 }
 
 static __always_inline bool
-slot_handle_level_4k(struct kvm *kvm, const struct kvm_memory_slot *memslot,
-		     slot_level_handler fn, bool flush_on_yield)
+slot_handle_leaf(struct kvm *kvm, const struct kvm_memory_slot *memslot,
+		 slot_level_handler fn, bool flush_on_yield)
 {
 	return slot_handle_level(kvm, memslot, fn, PG_LEVEL_4K,
 				 PG_LEVEL_4K, flush_on_yield);
@@ -5759,11 +5758,13 @@ void kvm_zap_gfn_range(struct kvm *kvm, gfn_t gfn_start, gfn_t gfn_end)
 		for (i = 0; i < KVM_ADDRESS_SPACE_NUM; i++)
 			flush = kvm_tdp_mmu_zap_gfn_range(kvm, i, gfn_start,
 							  gfn_end, flush);
+		if (flush)
+			kvm_flush_remote_tlbs_with_address(kvm, gfn_start,
+							   gfn_end - gfn_start);
 	}
 
 	if (flush)
-		kvm_flush_remote_tlbs_with_address(kvm, gfn_start,
-						   gfn_end - gfn_start);
+		kvm_flush_remote_tlbs_with_address(kvm, gfn_start, gfn_end);
 
 	kvm_dec_notifier_count(kvm, gfn_start, gfn_end);
 
@@ -5855,21 +5856,21 @@ restart:
 void kvm_mmu_zap_collapsible_sptes(struct kvm *kvm,
 				   const struct kvm_memory_slot *slot)
 {
+	bool flush = false;
+
 	if (kvm_memslots_have_rmaps(kvm)) {
 		write_lock(&kvm->mmu_lock);
-		/*
-		 * Zap only 4k SPTEs since the legacy MMU only supports dirty
-		 * logging at a 4k granularity and never creates collapsible
-		 * 2m SPTEs during dirty logging.
-		 */
-		if (slot_handle_level_4k(kvm, slot, kvm_mmu_zap_collapsible_spte, true))
+		flush = slot_handle_leaf(kvm, slot, kvm_mmu_zap_collapsible_spte, true);
+		if (flush)
 			kvm_arch_flush_remote_tlbs_memslot(kvm, slot);
 		write_unlock(&kvm->mmu_lock);
 	}
 
 	if (is_tdp_mmu_enabled(kvm)) {
 		read_lock(&kvm->mmu_lock);
-		kvm_tdp_mmu_zap_collapsible_sptes(kvm, slot);
+		flush = kvm_tdp_mmu_zap_collapsible_sptes(kvm, slot, flush);
+		if (flush)
+			kvm_arch_flush_remote_tlbs_memslot(kvm, slot);
 		read_unlock(&kvm->mmu_lock);
 	}
 }
@@ -5896,11 +5897,8 @@ void kvm_mmu_slot_leaf_clear_dirty(struct kvm *kvm,
 
 	if (kvm_memslots_have_rmaps(kvm)) {
 		write_lock(&kvm->mmu_lock);
-		/*
-		 * Clear dirty bits only on 4k SPTEs since the legacy MMU only
-		 * support dirty logging at a 4k granularity.
-		 */
-		flush = slot_handle_level_4k(kvm, memslot, __rmap_clear_dirty, false);
+		flush = slot_handle_leaf(kvm, memslot, __rmap_clear_dirty,
+					 false);
 		write_unlock(&kvm->mmu_lock);
 	}
 

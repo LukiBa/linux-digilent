@@ -2185,7 +2185,7 @@
 			};
 		};
 
-		cam-thermal-bottom {
+		camera-thermal-bottom {
 			polling-delay-passive = <250>;
 			polling-delay = <1000>;
 
